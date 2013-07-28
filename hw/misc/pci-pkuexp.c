@@ -25,7 +25,7 @@
 
 typedef struct PCIPkuExpState {
     /*< private >*/
-    PCIDevice parent_obj;
+    PCIDevice dev;
     /*< public >*/
 
     MemoryRegion mmio;
@@ -34,8 +34,8 @@ typedef struct PCIPkuExpState {
 } PCIPkuExpState;
 
 #define TYPE_PCI_PKUEXP_DEV "pci-pkuexp"
-#define IOPKU_IOSIZE 64
-#define IOPKU_MEMSIZE 64
+#define IOPKU_IOSIZE 128
+#define IOPKU_MEMSIZE 128
 
 static void
 pci_pkuexp_reset(PCIPkuExpState *d)
@@ -109,7 +109,7 @@ static int pci_pkuexp_init(PCIDevice *pci_dev)
 
     pci_conf = pci_dev->config;
 
-    pci_conf[PCI_INTERRUPT_PIN] = 0; /* no interrupt pin */
+    pci_conf[PCI_INTERRUPT_PIN] = 0x1;
 
     memory_region_init_io(&d->mmio, OBJECT(d), &pci_pkuexp_mmio_ops, d,
                           "pci-pkuexp-mmio", IOPKU_MEMSIZE * 2);
