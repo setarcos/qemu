@@ -3221,6 +3221,14 @@ STEXI
 prepend a timestamp to each log message.(default:on)
 ETEXI
 
+DEF("pkuexpport", HAS_ARG, QEMU_OPTION_pkuexp,
+    "-pkuexpport dev The exp-board is on serial device 'dev'\n",
+    QEMU_ARCH_ALL)
+STEXI
+@item -pkuexpport @var{dev}
+@findex -pkuexpport
+ETEXI
+
 HXCOMM This is the last statement. Insert new options before this line!
 STEXI
 @end table

@@ -37,6 +37,8 @@ typedef struct PCIPkuExpState {
 #define IOPKU_IOSIZE 128
 #define IOPKU_MEMSIZE 128
 
+extern const char *pkuexpport;
+
 static void
 pci_pkuexp_reset(PCIPkuExpState *d)
 {
@@ -106,6 +108,11 @@ static int pci_pkuexp_init(PCIDevice *pci_dev)
 {
     PCIPkuExpState *d = PCI_PKUEXP_DEV(pci_dev);
     uint8_t *pci_conf;
+
+    if (pkuexpport == NULL) {
+        printf("You need to specify a serial device to use PkuExp\n");
+        exit(1);
+    }
 
     pci_conf = pci_dev->config;
 

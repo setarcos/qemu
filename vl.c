@@ -181,7 +181,7 @@ static bool boot_strict;
 uint8_t *boot_splash_filedata;
 size_t boot_splash_filedata_size;
 uint8_t qemu_extra_params_fw[2];
-
+const char *pkuexpport = NULL;
 typedef struct FWBootEntry FWBootEntry;
 
 struct FWBootEntry {
@@ -3956,6 +3956,9 @@ int main(int argc, char **argv, char **envp)
                     exit(1);
                 }
                 configure_msg(opts);
+                break;
+            case QEMU_OPTION_pkuexp:
+                pkuexpport = optarg;
                 break;
             default:
                 os_parse_cmd_args(popt->index, optarg);
