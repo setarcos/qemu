@@ -19,6 +19,16 @@
 #include "hw/hw.h"
 #include "hw/pci/pci.h"
 #include "qemu/osdep.h"
+#include "qemu/main-loop.h"
+#ifdef WIN32
+#include <windows.h>
+#include <conio.h>
+#else
+#include <fcntl.h>
+#include <termios.h>
+#include <sys/ioctl.h>
+static struct termios options;
+#endif
 
 #define PCI_PKUEXP_DEV(obj) \
     OBJECT_CHECK(PCIPkuExpState, (obj), TYPE_PCI_PKUEXP_DEV)
@@ -27,47 +37,73 @@ typedef struct PCIPkuExpState {
     /*< private >*/
     PCIDevice dev;
     /*< public >*/
-
+#ifdef WIN32
+    HANDLE fd;
+#else
+    int fd;
+#endif
+    uint8_t data;
     MemoryRegion mmio;
     MemoryRegion portio;
-    int current;
+    qemu_irq irq;
 } PCIPkuExpState;
 
+static volatile uint8_t iostate;
+
 #define TYPE_PCI_PKUEXP_DEV "pci-pkuexp"
-#define IOPKU_IOSIZE 128
-#define IOPKU_MEMSIZE 128
+#define IOPKU_IOSIZE        128
+#define IOPKU_MEMSIZE       128
+#define CMD_INT             0x00
+#define CMD_READ            0x40
+#define CMD_WRITE           0x80
+#define S_WAIT_READ         0x10
+#define S_BEGIN_IO          0x20
 
 extern const char *pkuexpport;
 
 static void
 pci_pkuexp_reset(PCIPkuExpState *d)
 {
-    if (d->current == -1) {
-        return;
-    }
-    d->current = -1;
 }
+
 
 static void
 pci_pkuexp_write(void *opaque, hwaddr addr, uint64_t val,
                   unsigned size, int type)
 {
     PCIPkuExpState *d = opaque;
-    printf("Write\n");
-    if (d->current < 0) {
+    uint8_t buf[2];
+    ssize_t ret;
+    printf("Write %d\n", (int)addr);
+    if ((addr & 0xFF) > 0x40) {
+        pci_set_irq(&d->dev, 0);
         return;
+    }
+    iostate = S_BEGIN_IO;
+    buf[0] = CMD_WRITE + (addr & 0x3F);
+    buf[1] = val & 0xFF;
+    ret = write(d->fd, buf, 2);
+    if (ret < 0) return;
+    while (iostate) {
+        main_loop_wait(false);
     }
 }
 
 static uint64_t
 pci_pkuexp_read(void *opaque, hwaddr addr, unsigned size)
 {
-    printf("Read\n");
     PCIPkuExpState *d = opaque;
-    if (d->current < 0) {
-        return 0;
+    uint8_t buf;
+    ssize_t ret;
+    printf("Read\n");
+    buf = CMD_READ + (addr & 0x3F);
+    iostate = S_BEGIN_IO;
+    ret = write(d->fd, &buf, 1);
+    if (ret < 0) return -1;
+    while (iostate){
+        main_loop_wait(false);
     }
-    return 1;
+    return d->data;
 }
 
 static void
@@ -104,6 +140,99 @@ static const MemoryRegionOps pci_pkuexp_pio_ops = {
     },
 };
 
+static void pkuexp_serial_init(PCIPkuExpState *d)
+{
+#ifdef WIN32
+    d->fd = CreateFile(pkuexpport, GENERIC_READ | GENERIC_WRITE,
+                       0, NULL, OPEN_EXISTING, 0, NULL);
+
+    if (d->fd == INVALID_HANDLE_VALUE) {
+        perror("PKUExp: Could not connect to target TTY");
+        exit(1);
+    }
+
+    DCB dcb;
+    if (!GetCommState(d->fd, &dcb)) {
+        perror("PKUExp: Could not load config for target TTY");
+        exit(1);
+    }
+
+    dcb.BaudRate = CBR_115200;
+    dcb.ByteSize = 8;
+    dcb.Parity = NOPARITY;
+    dcb.StopBits = ONESTOPBIT;
+
+    if (!SetCommState(d->fd, &dcb)) {
+        perror("PKUExp: Could not store config for target TTY");
+        exit(1);
+    }
+#else
+    d->fd = open(pkuexpport, O_RDWR | O_NOCTTY | O_NONBLOCK);
+
+    if (d->fd == -1) {
+        perror("PKUExp: Could not connect to target TTY");
+        exit(1);
+    }
+
+    if (ioctl(d->fd, TIOCEXCL) == -1) {
+        perror("PKUExp: TTY not exclusively available");
+        exit(1);
+    }
+
+    if (fcntl(d->fd, F_SETFL, 0) == -1) {
+        perror("PKUExp: Could not switch to blocking I/O");
+        exit(1);
+    }
+
+    if (tcgetattr(d->fd, &options) == -1) {
+        perror("PKUExp: Could not get TTY attributes");
+        exit(1);
+    }
+
+    cfsetispeed(&options, B115200);
+    cfsetospeed(&options, B115200);
+
+    /* set raw input, 1 second timeout */
+    options.c_cflag |= (CLOCAL | CREAD);
+    options.c_lflag &= ~(ICANON | ECHO | ECHOE | ISIG);
+    options.c_oflag &= ~OPOST;
+    options.c_iflag |= IGNCR;
+    options.c_cc[VMIN] = 0;
+    options.c_cc[VTIME] = 100;
+
+    tcsetattr(d->fd, TCSANOW, &options);
+
+    tcflush(d->fd, TCIOFLUSH);
+#endif
+}
+
+static void pku_read(void *opaque)
+{
+    PCIPkuExpState *d = opaque;
+    uint8_t buf;
+    ssize_t len;
+#ifdef WIN32
+#else
+    len = read(d->fd, &buf, 1);
+#endif
+    if (len <0) return;
+    if (iostate == S_WAIT_READ) {
+        d->data = buf;
+        iostate = 0;
+        return;
+    }
+    if ((buf & 0xC0) == CMD_INT) {
+        pci_set_irq(&d->dev, 1);
+    }
+    if ((buf & 0xC0) == CMD_READ) {
+        iostate = S_WAIT_READ;
+    }
+    if ((buf & 0xC0) == CMD_WRITE) {
+        iostate = 0;
+    }
+    printf("%2x\n", buf);
+}
+
 static int pci_pkuexp_init(PCIDevice *pci_dev)
 {
     PCIPkuExpState *d = PCI_PKUEXP_DEV(pci_dev);
@@ -113,10 +242,14 @@ static int pci_pkuexp_init(PCIDevice *pci_dev)
         printf("You need to specify a serial device to use PkuExp\n");
         exit(1);
     }
+    pkuexp_serial_init(d);
+    qemu_set_fd_handler(d->fd, pku_read, NULL, d);
 
     pci_conf = pci_dev->config;
 
     pci_conf[PCI_INTERRUPT_PIN] = 0x1;
+
+    //d->irq = pci_allocate_irq(&d->dev);
 
     memory_region_init_io(&d->mmio, OBJECT(d), &pci_pkuexp_mmio_ops, d,
                           "pci-pkuexp-mmio", IOPKU_MEMSIZE * 2);
@@ -125,7 +258,6 @@ static int pci_pkuexp_init(PCIDevice *pci_dev)
     pci_register_bar(pci_dev, 0, PCI_BASE_ADDRESS_SPACE_MEMORY, &d->mmio);
     pci_register_bar(pci_dev, 1, PCI_BASE_ADDRESS_SPACE_IO, &d->portio);
 
-    d->current = -1;
     return 0;
 }
 
@@ -137,6 +269,7 @@ pci_pkuexp_uninit(PCIDevice *dev)
     pci_pkuexp_reset(d);
     memory_region_destroy(&d->mmio);
     memory_region_destroy(&d->portio);
+   // qemu_free_irq(d->irq);
 }
 
 static void qdev_pci_pkuexp_reset(DeviceState *dev)
