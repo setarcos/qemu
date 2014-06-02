@@ -19,6 +19,7 @@
 #include "hw/hw.h"
 #include "hw/pci/pci.h"
 #include "qemu/osdep.h"
+#include "qemu/timer.h"
 #include "qemu/main-loop.h"
 #ifdef WIN32
 #include <windows.h>
@@ -61,9 +62,37 @@ static volatile uint8_t iostate;
 
 extern const char *pkuexpport;
 
-static void
-pci_pkuexp_reset(PCIPkuExpState *d)
+static void pci_pkuexp_reset(PCIPkuExpState *d)
 {
+}
+
+static void pkuexp_read_ack(PCIPkuExpState *d)
+{
+    ssize_t ret;
+    uint8_t buf;
+
+    ret = read(d->fd, &buf, 1);
+    if (ret < 0) return;
+    if ((buf & 0xC0) == CMD_WRITE) {
+        iostate = 0;
+        return;
+    }
+    if ((buf & 0xC0) == CMD_INT) {
+        pci_set_irq(&d->dev, 1);
+        return;
+    }
+    if ((buf & 0xC0) == CMD_READ) {
+        ret = read(d->fd, &buf, 1);
+        if (ret < 0) return;
+        d->data = buf;
+        iostate = 0;
+    }
+}
+
+static void pku_read(void *opaque)
+{
+    PCIPkuExpState *d = opaque;
+    pkuexp_read_ack(d);
 }
 
 
@@ -79,14 +108,19 @@ pci_pkuexp_write(void *opaque, hwaddr addr, uint64_t val,
         pci_set_irq(&d->dev, 0);
         return;
     }
-    iostate = S_BEGIN_IO;
     buf[0] = CMD_WRITE + (addr & 0x3F);
     buf[1] = val & 0xFF;
+    iostate = S_BEGIN_IO;
     ret = write(d->fd, buf, 2);
-    if (ret < 0) return;
-    while (iostate) {
-        main_loop_wait(false);
+    if (ret < 0) {
+        printf("write failed\n");
+        return;
     }
+    qemu_set_fd_handler(d->fd, NULL, NULL, NULL);
+    while (iostate) {
+        pkuexp_read_ack(d);
+    }
+    qemu_set_fd_handler(d->fd, pku_read, NULL, d);
 }
 
 static uint64_t
@@ -95,14 +129,16 @@ pci_pkuexp_read(void *opaque, hwaddr addr, unsigned size)
     PCIPkuExpState *d = opaque;
     uint8_t buf;
     ssize_t ret;
-    printf("Read\n");
+    printf("Read %d\n", (int)addr);
     buf = CMD_READ + (addr & 0x3F);
     iostate = S_BEGIN_IO;
     ret = write(d->fd, &buf, 1);
     if (ret < 0) return -1;
-    while (iostate){
-        main_loop_wait(false);
+    qemu_set_fd_handler(d->fd, NULL, NULL, NULL);
+    while (iostate) {
+        pkuexp_read_ack(d);
     }
+    qemu_set_fd_handler(d->fd, pku_read, NULL, d);
     return d->data;
 }
 
@@ -204,33 +240,6 @@ static void pkuexp_serial_init(PCIPkuExpState *d)
 
     tcflush(d->fd, TCIOFLUSH);
 #endif
-}
-
-static void pku_read(void *opaque)
-{
-    PCIPkuExpState *d = opaque;
-    uint8_t buf;
-    ssize_t len;
-#ifdef WIN32
-#else
-    len = read(d->fd, &buf, 1);
-#endif
-    if (len <0) return;
-    if (iostate == S_WAIT_READ) {
-        d->data = buf;
-        iostate = 0;
-        return;
-    }
-    if ((buf & 0xC0) == CMD_INT) {
-        pci_set_irq(&d->dev, 1);
-    }
-    if ((buf & 0xC0) == CMD_READ) {
-        iostate = S_WAIT_READ;
-    }
-    if ((buf & 0xC0) == CMD_WRITE) {
-        iostate = 0;
-    }
-    printf("%2x\n", buf);
 }
 
 static int pci_pkuexp_init(PCIDevice *pci_dev)
