@@ -26,6 +26,7 @@
 #include <conio.h>
 #else
 #include <fcntl.h>
+#include <errno.h>
 #include <termios.h>
 #include <sys/ioctl.h>
 static struct termios options;
@@ -71,7 +72,7 @@ static void pkuexp_read_ack(PCIPkuExpState *d)
     ssize_t ret;
     uint8_t buf;
 
-    ret = read(d->fd, &buf, 1);
+    TFR(ret = read(d->fd, &buf, 1));
     if (ret < 0) return;
     if ((buf & 0xC0) == CMD_WRITE) {
         iostate = 0;
@@ -82,7 +83,7 @@ static void pkuexp_read_ack(PCIPkuExpState *d)
         return;
     }
     if ((buf & 0xC0) == CMD_READ) {
-        ret = read(d->fd, &buf, 1);
+        TFR(ret = read(d->fd, &buf, 1));
         if (ret < 0) return;
         d->data = buf;
         iostate = 0;
@@ -103,7 +104,7 @@ pci_pkuexp_write(void *opaque, hwaddr addr, uint64_t val,
     PCIPkuExpState *d = opaque;
     uint8_t buf[2];
     ssize_t ret;
-    printf("Write %d\n", (int)addr);
+    //printf("Write %d\n", (int)addr);
     if ((addr & 0xFF) > 0x40) {
         pci_set_irq(&d->dev, 0);
         return;
@@ -111,12 +112,12 @@ pci_pkuexp_write(void *opaque, hwaddr addr, uint64_t val,
     buf[0] = CMD_WRITE + (addr & 0x3F);
     buf[1] = val & 0xFF;
     iostate = S_BEGIN_IO;
-    ret = write(d->fd, buf, 2);
+    qemu_set_fd_handler(d->fd, NULL, NULL, NULL);
+    TFR(ret = write(d->fd, buf, 2));
     if (ret < 0) {
-        printf("write failed\n");
+        perror("PkuExp(write)");
         return;
     }
-    qemu_set_fd_handler(d->fd, NULL, NULL, NULL);
     while (iostate) {
         pkuexp_read_ack(d);
     }
@@ -129,12 +130,15 @@ pci_pkuexp_read(void *opaque, hwaddr addr, unsigned size)
     PCIPkuExpState *d = opaque;
     uint8_t buf;
     ssize_t ret;
-    printf("Read %d\n", (int)addr);
+    //printf("Read %d\n", (int)addr);
     buf = CMD_READ + (addr & 0x3F);
     iostate = S_BEGIN_IO;
-    ret = write(d->fd, &buf, 1);
-    if (ret < 0) return -1;
     qemu_set_fd_handler(d->fd, NULL, NULL, NULL);
+    TFR(ret = write(d->fd, &buf, 1));
+    if (ret < 0) {
+        perror("PkuExp(read)");
+        return ret;
+    }
     while (iostate) {
         pkuexp_read_ack(d);
     }
